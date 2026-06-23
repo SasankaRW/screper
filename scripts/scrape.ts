@@ -25,6 +25,15 @@ const MAX_SCROLLS = 6;
 const SCROLL_DELAY_MS = 2000;
 const PRICE_RE = /(?:rs|lkr|rs\.|lkr\.)\s*([\d,]{3,})|(\d{2,3}[,\.]?\d{3})\s*\/?=?/i;
 
+function normalizeSameSite(v: unknown): "Strict" | "Lax" | "None" {
+  if (typeof v !== "string") return "Lax";
+  const s = v.toLowerCase();
+  if (s === "strict") return "Strict";
+  if (s === "none" || s === "no_restriction") return "None";
+  // "lax", "unspecified", "", or anything unexpected → safe default
+  return "Lax";
+}
+
 async function loadCookies(): Promise<Cookie[]> {
   // Prefer env var (works for GH Actions); fall back to .env.local for dev convenience.
   let raw = process.env.FB_COOKIES;
@@ -53,7 +62,7 @@ async function loadCookies(): Promise<Cookie[]> {
       path: String(c.path ?? "/"),
       httpOnly: Boolean(c.httpOnly),
       secure: c.secure !== false,
-      sameSite: (c.sameSite as Cookie["sameSite"]) || "Lax",
+      sameSite: normalizeSameSite(c.sameSite),
       expires:
         typeof c.expires === "number"
           ? c.expires

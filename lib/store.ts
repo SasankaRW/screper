@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { FbGroup, Post, SearchProfile } from "./types";
-import { SEED_GROUPS, SEED_POSTS } from "./seed";
+import { SEED_GROUPS } from "./seed";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const GROUPS_FILE = path.join(DATA_DIR, "groups.json");
@@ -62,7 +62,7 @@ export async function removeGroup(id: string): Promise<void> {
 }
 
 export async function getPosts(): Promise<Post[]> {
-  return readJsonOrSeed<Post[]>(POSTS_FILE, SEED_POSTS);
+  return readJsonOrSeed<Post[]>(POSTS_FILE, []);
 }
 
 export async function upsertPosts(incoming: Post[]): Promise<{ added: number; total: number }> {
