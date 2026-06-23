@@ -18,12 +18,25 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { chromium, type BrowserContext, type Cookie } from "playwright";
-import { getGroups, upsertPosts } from "../lib/store";
+import { getGroups, getProfile, upsertPosts } from "../lib/store";
+import { filterPosts } from "../lib/filter";
 import type { Post } from "../lib/types";
 
-const MAX_SCROLLS = 6;
-const SCROLL_DELAY_MS = 2000;
+const MAX_SCROLLS = 25;
+const SCROLL_DELAY_MS = 2500;
 const PRICE_RE = /(?:rs|lkr|rs\.|lkr\.)\s*([\d,]{3,})|(\d{2,3}[,\.]?\d{3})\s*\/?=?/i;
+
+// "See more" expand-control labels across the languages these groups use.
+// FB renders the control as a clickable element whose text is exactly one of
+// these; clicking expands the post inline (no navigation).
+const SEE_MORE_LABELS = [
+  "see more",
+  "තවත් බලන්න", // Sinhala
+  "மேலும் பார்க்க", // Tamil
+  "ещё", // (other locales, harmless extras)
+  "voir plus",
+  "ver más",
+];
 
 function normalizeSameSite(v: unknown): "Strict" | "Lax" | "None" {
   if (typeof v !== "string") return "Lax";
@@ -98,28 +111,51 @@ async function scrapeGroup(
     return [];
   }
 
-  for (let i = 0; i < MAX_SCROLLS; i++) {
-    await page.mouse.wheel(0, 4000);
-    await page.waitForTimeout(SCROLL_DELAY_MS);
-  }
+  // FB virtualizes the feed: only posts near the viewport exist in the DOM at
+  // any moment, and they're destroyed as they scroll out of view. So we harvest
+  // after every scroll step and accumulate, keyed by permalink, instead of
+  // reading the DOM once at the end.
+  type Row = { text: string; permalink: string; author: string | null };
+  const byPermalink = new Map<string, Row>();
 
-  // FB renders posts inside <div role="article">. Each post has at least one anchor
-  // whose href contains "/posts/" or "/permalink/" — we use that as the permalink + id.
-  const rows = await page
-    .locator('div[role="article"]')
-    .evaluateAll((articles) => {
-      const seen = new Set<string>();
+  // Click every visible "See more" so the full post text is in the DOM before
+  // we read it — otherwise keywords in the truncated tail get missed.
+  const expandSeeMore = async () => {
+    try {
+      const clicked = await page.evaluate((labels: string[]) => {
+        let n = 0;
+        const controls = document.querySelectorAll<HTMLElement>(
+          'div[role="button"], span[role="button"], a[role="button"]',
+        );
+        controls.forEach((el) => {
+          const t = (el.textContent || "").trim().toLowerCase();
+          // Exact-match only — avoids hitting "See more comments", reactions, etc.
+          if (labels.includes(t)) {
+            el.click();
+            n++;
+          }
+        });
+        return n;
+      }, SEE_MORE_LABELS);
+      if (clicked > 0) await page.waitForTimeout(700);
+    } catch {
+      // Expansion is best-effort; never let it abort a scrape.
+    }
+  };
+
+  const harvest = async () => {
+    await expandSeeMore();
+    const found = await page.locator('div[role="article"]').evaluateAll((articles) => {
       const out: Array<{ text: string; permalink: string; author: string | null }> = [];
       for (const a of articles) {
         const text = (a as HTMLElement).innerText?.trim() ?? "";
         if (!text || text.length < 40) continue;
+        // Match the post permalink in any of FB's link shapes.
         const link = (a as HTMLElement).querySelector<HTMLAnchorElement>(
-          'a[href*="/posts/"], a[href*="/permalink/"], a[href*="/groups/"][href*="/posts/"]',
+          'a[href*="/posts/"], a[href*="/permalink/"], a[href*="permalink.php"], a[href*="story_fbid"], a[href*="multi_permalinks"]',
         );
         if (!link?.href) continue;
         const permalink = link.href.split("?")[0];
-        if (seen.has(permalink)) continue;
-        seen.add(permalink);
         const authorEl = (a as HTMLElement).querySelector<HTMLElement>(
           'h3 a, h2 a, strong a, [aria-label] strong',
         );
@@ -127,8 +163,30 @@ async function scrapeGroup(
       }
       return out;
     });
+    for (const r of found) {
+      // Keep the longest text version we've seen (posts expand "See more" lazily).
+      const prev = byPermalink.get(r.permalink);
+      if (!prev || r.text.length > prev.text.length) byPermalink.set(r.permalink, r);
+    }
+  };
+
+  let stagnantScrolls = 0;
+  for (let i = 0; i < MAX_SCROLLS; i++) {
+    await harvest();
+    const before = byPermalink.size;
+    await page.mouse.wheel(0, 5000);
+    await page.waitForTimeout(SCROLL_DELAY_MS);
+    await harvest();
+    // Stop early if several scrolls in a row yield nothing new (end of feed).
+    if (byPermalink.size === before) {
+      if (++stagnantScrolls >= 3) break;
+    } else {
+      stagnantScrolls = 0;
+    }
+  }
 
   await page.close();
+  const rows = [...byPermalink.values()];
   console.log(`  found ${rows.length} candidate posts`);
 
   const nowIso = new Date().toISOString();
@@ -158,6 +216,23 @@ async function main() {
     return;
   }
 
+  // Load the saved filters so we only store posts that actually match.
+  const profile = await getProfile();
+  // We already chose which groups to scrape, so don't re-apply the group
+  // filter here — only keyword/location/price filters matter at this stage.
+  const scrapeFilter = { ...profile, groupIds: [] };
+  const hasKeywordFilter =
+    profile.locations.length > 0 ||
+    profile.mustKeywords.length > 0 ||
+    profile.goodKeywords.length > 0;
+  console.log(
+    hasKeywordFilter
+      ? `Filtering with: locations=[${profile.locations.join(", ")}] must=[${profile.mustKeywords.join(
+          ", ",
+        )}] good=[${profile.goodKeywords.join(", ")}]`
+      : "No keyword filters set — storing every post. Add filters in Settings.",
+  );
+
   const browser = await chromium.launch({ headless: true });
   const ctx = await browser.newContext({
     viewport: { width: 1280, height: 900 },
@@ -171,7 +246,11 @@ async function main() {
     try {
       const posts = await scrapeGroup(ctx, g);
       if (posts.length === 0) continue;
-      const { added, total } = await upsertPosts(posts);
+      // Keep only posts that match the saved keywords/location/price filters.
+      const matched = filterPosts(posts, scrapeFilter);
+      console.log(`  ${matched.length}/${posts.length} match your filters`);
+      if (matched.length === 0) continue;
+      const { added, total } = await upsertPosts(matched);
       console.log(`  + ${added} new (store has ${total} total)`);
       totalAdded += added;
     } catch (err) {
