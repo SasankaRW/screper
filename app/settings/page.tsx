@@ -426,12 +426,6 @@ function ScrapePanel({
         </button>
 
         {message && <p className="mt-3 text-sm text-blue-50">{message}</p>}
-        {status && !status.canTrigger && (
-          <p className="mt-3 text-xs leading-5 text-blue-100">
-            Manual runs need GITHUB_WORKFLOW_TOKEN and GITHUB_REPOSITORY in the
-            app environment.
-          </p>
-        )}
       </div>
     </section>
   );
