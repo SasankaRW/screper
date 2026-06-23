@@ -1,15 +1,5 @@
 {
-  "locations": [
-    "Malabe"
-  ],
-  "keywords": [
-    "annex",
-    "2 rooms",
-    "kitchen"
-  ],
-  "groupIds": [
-    "g1",
-    "g2",
-    "g3"
-  ]
+  "locations": [],
+  "keywords": [],
+  "groupIds": []
 }

@@ -9,8 +9,8 @@ const POSTS_FILE = path.join(DATA_DIR, "posts.json");
 const PROFILE_FILE = path.join(DATA_DIR, "profile.json");
 
 const DEFAULT_PROFILE: SearchProfile = {
-  locations: ["Malabe"],
-  keywords: ["annex", "2 rooms", "kitchen"],
+  locations: [],
+  keywords: [],
   groupIds: SEED_GROUPS.map((g) => g.id),
 };
 
